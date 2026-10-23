@@ -1,0 +1,341 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * ENUMS
+ */
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  LOCKED
+  DELETED
+}
+
+enum OAuthProvider {
+  GOOGLE
+  GITHUB
+}
+
+enum MfaMethodType {
+  PASSKEY
+  TOTP
+}
+
+/**
+ * USER
+ * Core identity/account.
+ * Authentication mechanisms are stored separately.
+ */
+
+model User {
+  id     String     @id @default(uuid()) @db.Uuid
+  status UserStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  passwordCredential PasswordCredential?
+  emailAddresses     EmailAddress[]
+  phoneNumber        PhoneNumber?
+  oauthAccounts      OAuthAccount[]
+  sessions           Session[]
+  mfaMethods         MfaMethod[]
+  passkeys           Passkey[]
+  recoveryCodes      RecoveryCode[]
+  auditLogs          AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("users")
+}
+
+/**
+ * PASSWORD CREDENTIAL
+ * Stores the password hash.
+ * Never store plaintext passwords.
+ */
+
+model PasswordCredential {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @db.Uuid
+
+  passwordHash      String
+  passwordChangedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_credentials")
+}
+
+/**
+ * EMAIL ADDRESS
+ */
+
+model EmailAddress {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  email      String    @unique
+  isPrimary  Boolean   @default(true)
+  verifiedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([verifiedAt])
+  @@map("email_addresses")
+}
+
+/**
+ * PHONE NUMBER
+ * Store normalized E.164 format.
+ * Example: +919876543210
+ */
+
+model PhoneNumber {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @unique @db.Uuid
+  phoneNumber String    @unique
+  verifiedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+
+  @@map("phone_numbers")
+}
+
+/**
+ * OAUTH ACCOUNT
+ */
+
+model OAuthAccount {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  provider          OAuthProvider
+  providerAccountId String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("oauth_accounts")
+}
+
+/**
+ * SESSION
+ * Represents one authenticated device/session.
+ * Example:
+ * User
+ * ├── Laptop Session
+ * ├── Mobile Session
+ * └── Work PC Session
+ * Refresh tokens belong to a session.
+ */
+
+model Session {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  userAgent String?
+  ipAddress String?
+
+  expiresAt  DateTime
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@map("sessions")
+}
+
+/**
+ * REFRESH TOKEN
+ * Individual refresh-token credential.
+ * Every successful refresh:
+ * R1 -> R2 -> R3 -> R4
+ * Old token becomes unusable.
+ * tokenFamilyId identifies all tokens
+ * belonging to the same session/token lineage.
+ */
+
+model RefreshToken {
+  id        String @id @default(uuid()) @db.Uuid
+  sessionId String @db.Uuid
+
+  tokenFamilyId String
+  tokenHash     String @unique
+
+  expiresAt DateTime
+
+  usedAt    DateTime?
+  revokedAt DateTime?
+
+  replacedByTokenId String? @unique @db.Uuid
+
+  createdAt DateTime @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  replacedBy RefreshToken? @relation("RefreshTokenRotation", fields: [replacedByTokenId], references: [id])
+
+  replacedFrom RefreshToken? @relation("RefreshTokenRotation")
+
+  @@index([sessionId])
+  @@index([tokenFamilyId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@index([usedAt])
+  @@map("refresh_tokens")
+}
+
+/**
+ * MFA METHOD
+ * High-level record indicating which MFA
+ * mechanism is enabled for a user.
+ */
+
+model MfaMethod {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  type MfaMethodType
+
+  secretEncrypted String?
+
+  enabledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@map("mfa_methods")
+}
+
+/**
+ * PASSKEY
+ * WebAuthn credential information.
+ * Private key NEVER reaches our backend.
+ */
+
+model Passkey {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  credentialId String @unique
+  publicKey    String
+
+  counter Int @default(0)
+
+  deviceType String?
+  backedUp   Boolean @default(false)
+  transports String?
+
+  lastUsedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("passkeys")
+}
+
+/**
+ * RECOVERY CODE
+ */
+
+model RecoveryCode {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  codeHash String
+  usedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([usedAt])
+  @@map("recovery_codes")
+}
+
+/**
+ * AUDIT LOG
+ * Security events:
+ * LOGIN_SUCCESS
+ * LOGIN_FAILED
+ * PASSWORD_CHANGED
+ * SESSION_REVOKED
+ * REFRESH_TOKEN_REUSE_DETECTED
+ * etc.
+ */
+
+model AuditLog {
+  id     String  @id @default(uuid()) @db.Uuid
+  userId String? @db.Uuid
+
+  event     String
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([event])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model PasswordResetToken {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @db.Uuid
+
+  tokenHash String @unique
+
+  expiresAt DateTime
+  usedAt    DateTime?
+  revokedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId],references: [id],onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([usedAt])
+  @@index([revokedAt])
+  @@map("password_reset_tokens")
+}
